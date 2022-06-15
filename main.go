@@ -2,66 +2,79 @@ package main
 
 import (
 	"fmt"
-	"log"
-	"os"
+	"sort"
 
+	"github.com/iancoleman/strcase"
 	"github.com/sensu-community/sensu-plugin-sdk/sensu"
 	"github.com/sensu/sensu-go/types"
+	"github.com/shirou/gopsutil/v3/net"
 )
 
 // Config represents the check plugin config.
 type Config struct {
 	sensu.PluginConfig
-	Example string
+}
+
+type MetricGroup struct {
+	Comment string
+	Type    string
+	Name    string
+	Value   int64
+}
+
+func (g *MetricGroup) Output() {
+	fmt.Printf("# HELP %s %s\n", g.Name, g.Comment)
+	fmt.Printf("# TYPE %s %s\n", g.Name, g.Type)
+	fmt.Printf("%s %v\n", g.Name, g.Value)
 }
 
 var (
 	plugin = Config{
 		PluginConfig: sensu.PluginConfig{
 			Name:     "check-netstat",
-			Short:    "Simple cross-platform /proc/net/netstat checks",
+			Short:    "Simple cross-platform network statistics checks",
 			Keyspace: "sensu.io/plugins/check-netstat/config",
-		},
-	}
-
-	options = []*sensu.PluginConfigOption{
-		&sensu.PluginConfigOption{
-			Path:      "example",
-			Env:       "CHECK_EXAMPLE",
-			Argument:  "example",
-			Shorthand: "e",
-			Default:   "",
-			Usage:     "An example string configuration option",
-			Value:     &plugin.Example,
 		},
 	}
 )
 
 func main() {
-	useStdin := false
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		fmt.Printf("Error check stdin: %v\n", err)
-		panic(err)
-	}
-	//Check the Mode bitmask for Named Pipe to indicate stdin is connected
-	if fi.Mode()&os.ModeNamedPipe != 0 {
-		log.Println("using stdin")
-		useStdin = true
-	}
-
-	check := sensu.NewGoCheck(&plugin.PluginConfig, options, checkArgs, executeCheck, useStdin)
+	check := sensu.NewGoCheck(&plugin.PluginConfig, nil, checkArgs, executeCheck, false)
 	check.Execute()
 }
 
 func checkArgs(event *types.Event) (int, error) {
-	if len(plugin.Example) == 0 {
-		return sensu.CheckStateWarning, fmt.Errorf("--example or CHECK_EXAMPLE environment variable is required")
-	}
 	return sensu.CheckStateOK, nil
 }
 
 func executeCheck(event *types.Event) (int, error) {
-	log.Println("executing check with --example", plugin.Example)
+	protoCounters, err := net.ProtoCounters(nil)
+	if err != nil {
+		return sensu.CheckStateCritical, fmt.Errorf("Failed to get network statistics, error: %v", err)
+	}
+
+	var metricGroups = map[string]*MetricGroup{}
+
+	for _, protoCounter := range protoCounters {
+		for k, v := range protoCounter.Stats {
+			measurement := fmt.Sprintf("%s_%s", protoCounter.Protocol, strcase.ToSnake(k))
+			metricGroups[measurement] = &MetricGroup{
+				Name:    measurement,
+				Type:    "untyped",
+				Comment: fmt.Sprintf("Statistic %s %s", protoCounter.Protocol, k),
+				Value:   v,
+			}
+		}
+	}
+
+	sortedMeasurements := make([]string, 0, len(metricGroups))
+	for measurement := range metricGroups {
+		sortedMeasurements = append(sortedMeasurements, measurement)
+	}
+	sort.Strings(sortedMeasurements)
+	for _, sortedMeasurement := range sortedMeasurements {
+		metricGroups[sortedMeasurement].Output()
+	}
+
 	return sensu.CheckStateOK, nil
 }
